@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scanify</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css"
+      rel="stylesheet"
+      type="text/css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+    <style>
+      body {
+        min-height: 100vh;
+      }
+
+      #canvas {
+        max-width: 800px;
+        width: 100%;
+        touch-action: none;
+      }
+
+      .overlay-backdrop {
+        backdrop-filter: blur(4px);
+      }
+    </style>
+  </head>
+  <body class="bg-base-200">
+    <div
+      id="loadingOverlay"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-base-300/90 overlay-backdrop"
+    >
+      <div class="text-center">
+        <span class="loading loading-spinner loading-lg"></span>
+        <p class="mt-4 text-lg font-semibold">Initializing Scan Engine...</p>
+      </div>
+    </div>
+
+    <div class="navbar bg-base-100 shadow-sm px-4 gap-3">
+      <div class="flex-1">
+        <a class="text-2xl font-bold">Scanify</a>
+      </div>
+      <div class="flex-none flex items-center gap-2 flex-wrap justify-end">
+        <button id="exportJpgBtn" class="btn btn-sm btn-outline" disabled>
+          Export JPG
+        </button>
+        <button id="exportPdfBtn" class="btn btn-sm btn-primary" disabled>
+          Export PDF
+        </button>
+        <select id="themeSelect" class="select select-bordered select-sm w-40">
+          <option>light</option>
+          <option>dark</option>
+          <option>cupcake</option>
+          <option>bumblebee</option>
+          <option>emerald</option>
+          <option>corporate</option>
+          <option>synthwave</option>
+          <option>retro</option>
+          <option>cyberpunk</option>
+          <option>valentine</option>
+          <option>halloween</option>
+          <option>garden</option>
+          <option>forest</option>
+          <option>aqua</option>
+          <option>lofi</option>
+          <option>pastel</option>
+          <option>fantasy</option>
+          <option>wireframe</option>
+          <option>black</option>
+          <option>luxury</option>
+          <option>dracula</option>
+        </select>
+      </div>
+    </div>
+
+    <main class="container mx-auto p-4 space-y-4">
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body gap-4">
+          <div class="flex flex-wrap gap-3 items-center">
+            <input
+              id="fileInput"
+              type="file"
+              class="file-input file-input-bordered"
+              accept="image/*"
+              capture="environment"
+            />
+            <button id="scanBtn" class="btn btn-secondary" disabled>Scan</button>
+            <button id="addPageBtn" class="btn btn-accent" disabled>Add Page</button>
+            <div class="join">
+              <input
+                class="join-item btn"
+                type="radio"
+                name="viewMode"
+                aria-label="Original"
+                value="original"
+                checked
+              />
+              <input
+                class="join-item btn"
+                type="radio"
+                name="viewMode"
+                aria-label="Grayscale"
+                value="gray"
+              />
+              <input
+                class="join-item btn"
+                type="radio"
+                name="viewMode"
+                aria-label="Black & White (Threshold)"
+                value="threshold"
+              />
+            </div>
+          </div>
+
+          <div class="text-sm opacity-80" id="statusText">
+            Upload or capture a document image to begin.
+          </div>
+
+          <div class="w-full overflow-auto flex justify-center bg-base-200 rounded-lg p-3">
+            <canvas id="canvas"></canvas>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
+    <script>
+      const state = {
+        cvReady: false,
+        imageLoaded: false,
+        mode: 'crop',
+        originalImage: null,
+        previewScale: 1,
+        displayWidth: 0,
+        displayHeight: 0,
+        handles: [],
+        draggingIndex: -1,
+        dragRadius: 18,
+        processed: {
+          original: null,
+          gray: null,
+          threshold: null,
+        },
+        pages: [],
+        selectedView: 'original',
+      };
+
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const fileInput = document.getElementById('fileInput');
+      const scanBtn = document.getElementById('scanBtn');
+      const addPageBtn = document.getElementById('addPageBtn');
+      const exportPdfBtn = document.getElementById('exportPdfBtn');
+      const exportJpgBtn = document.getElementById('exportJpgBtn');
+      const statusText = document.getElementById('statusText');
+      const themeSelect = document.getElementById('themeSelect');
+
+      themeSelect.addEventListener('change', (e) => {
+        document.documentElement.setAttribute('data-theme', e.target.value);
+      });
+
+      function setStatus(message) {
+        statusText.textContent = message;
+      }
+
+      function distance(a, b) {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return Math.hypot(dx, dy);
+      }
+
+      function sortPoints(points) {
+        const sums = points.map((p) => p.x + p.y);
+        const diffs = points.map((p) => p.y - p.x);
+
+        const tl = points[sums.indexOf(Math.min(...sums))];
+        const br = points[sums.indexOf(Math.max(...sums))];
+        const tr = points[diffs.indexOf(Math.min(...diffs))];
+        const bl = points[diffs.indexOf(Math.max(...diffs))];
+
+        return [tl, tr, br, bl];
+      }
+
+      function initializeHandles() {
+        const insetX = canvas.width * 0.2;
+        const insetY = canvas.height * 0.2;
+        state.handles = [
+          { x: insetX, y: insetY },
+          { x: canvas.width - insetX, y: insetY },
+          { x: canvas.width - insetX, y: canvas.height - insetY },
+          { x: insetX, y: canvas.height - insetY },
+        ];
+      }
+
+      function drawCropView() {
+        if (!state.originalImage) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(state.originalImage, 0, 0, canvas.width, canvas.height);
+
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#22d3ee';
+        ctx.beginPath();
+        state.handles.forEach((h, i) => {
+          if (i === 0) ctx.moveTo(h.x, h.y);
+          else ctx.lineTo(h.x, h.y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+
+        const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b'];
+        state.handles.forEach((h, i) => {
+          ctx.fillStyle = colors[i];
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
+        });
+      }
+
+      function drawProcessedView() {
+        const img = state.processed[state.selectedView] || state.processed.threshold;
+        if (!img) return;
+
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+      }
+
+      function redraw() {
+        if (state.mode === 'crop') drawCropView();
+        else drawProcessedView();
+      }
+
+      function getCanvasPos(evt) {
+        const rect = canvas.getBoundingClientRect();
+        const touch = evt.touches ? evt.touches[0] : evt;
+        return {
+          x: ((touch.clientX - rect.left) * canvas.width) / rect.width,
+          y: ((touch.clientY - rect.top) * canvas.height) / rect.height,
+        };
+      }
+
+      function onPointerDown(evt) {
+        if (state.mode !== 'crop') return;
+        evt.preventDefault();
+        const pos = getCanvasPos(evt);
+        state.draggingIndex = state.handles.findIndex((h) => distance(h, pos) < state.dragRadius);
+      }
+
+      function onPointerMove(evt) {
+        if (state.draggingIndex < 0 || state.mode !== 'crop') return;
+        evt.preventDefault();
+        const pos = getCanvasPos(evt);
+        state.handles[state.draggingIndex].x = Math.max(0, Math.min(canvas.width, pos.x));
+        state.handles[state.draggingIndex].y = Math.max(0, Math.min(canvas.height, pos.y));
+        drawCropView();
+      }
+
+      function onPointerUp() {
+        state.draggingIndex = -1;
+      }
+
+      canvas.addEventListener('mousedown', onPointerDown);
+      canvas.addEventListener('mousemove', onPointerMove);
+      window.addEventListener('mouseup', onPointerUp);
+
+      canvas.addEventListener('touchstart', onPointerDown, { passive: false });
+      canvas.addEventListener('touchmove', onPointerMove, { passive: false });
+      window.addEventListener('touchend', onPointerUp);
+      window.addEventListener('touchcancel', onPointerUp);
+
+      function loadImageFile(file) {
+        const img = new Image();
+        img.onload = () => {
+          state.originalImage = img;
+
+          const maxPreview = 800;
+          const scale = Math.min(maxPreview / img.width, maxPreview / img.height, 1);
+          const displayWidth = Math.round(img.width * scale);
+          const displayHeight = Math.round(img.height * scale);
+
+          state.previewScale = img.width / displayWidth;
+          state.displayWidth = displayWidth;
+          state.displayHeight = displayHeight;
+
+          canvas.width = displayWidth;
+          canvas.height = displayHeight;
+
+          state.mode = 'crop';
+          state.imageLoaded = true;
+          state.processed = { original: null, gray: null, threshold: null };
+
+          initializeHandles();
+          redraw();
+          scanBtn.disabled = !state.cvReady;
+          addPageBtn.disabled = true;
+          exportJpgBtn.disabled = true;
+          setStatus('Drag corner points to fit document edges, then click Scan.');
+        };
+        img.src = URL.createObjectURL(file);
+      }
+
+      fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        loadImageFile(file);
+      });
+
+      function imageFromCanvas(cvCanvas) {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.src = cvCanvas.toDataURL('image/png');
+        });
+      }
+
+      async function runScan() {
+        if (!state.cvReady || !state.imageLoaded) return;
+
+        setStatus('Processing document...');
+
+        const sorted = sortPoints(
+          state.handles.map((p) => ({
+            x: p.x * state.previewScale,
+            y: p.y * state.previewScale,
+          }))
+        );
+
+        const [tl, tr, br, bl] = sorted;
+        const widthA = distance(br, bl);
+        const widthB = distance(tr, tl);
+        const maxWidth = Math.max(1, Math.round(Math.max(widthA, widthB)));
+
+        const heightA = distance(tr, br);
+        const heightB = distance(tl, bl);
+        const maxHeight = Math.max(1, Math.round(Math.max(heightA, heightB)));
+
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = state.originalImage.width;
+        fullCanvas.height = state.originalImage.height;
+        fullCanvas.getContext('2d').drawImage(state.originalImage, 0, 0);
+
+        let src = null;
+        let srcRGBA = null;
+        let dst = null;
+        let M = null;
+        let dsize = null;
+        let srcTri = null;
+        let dstTri = null;
+        let gray = null;
+        let blur = null;
+        let thresh = null;
+
+        try {
+          srcRGBA = cv.imread(fullCanvas);
+          src = new cv.Mat();
+          cv.cvtColor(srcRGBA, src, cv.COLOR_RGBA2RGB);
+
+          srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y]);
+          dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, maxWidth - 1, 0, maxWidth - 1, maxHeight - 1, 0, maxHeight - 1]);
+
+          M = cv.getPerspectiveTransform(srcTri, dstTri);
+          dsize = new cv.Size(maxWidth, maxHeight);
+          dst = new cv.Mat();
+          cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+
+          gray = new cv.Mat();
+          cv.cvtColor(dst, gray, cv.COLOR_RGB2GRAY);
+
+          blur = new cv.Mat();
+          cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+
+          thresh = new cv.Mat();
+          cv.adaptiveThreshold(
+            blur,
+            thresh,
+            255,
+            cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv.THRESH_BINARY,
+            21,
+            10
+          );
+
+          const cOriginal = document.createElement('canvas');
+          const cGray = document.createElement('canvas');
+          const cThresh = document.createElement('canvas');
+
+          cv.imshow(cOriginal, dst);
+          cv.imshow(cGray, gray);
+          cv.imshow(cThresh, thresh);
+
+          state.processed.original = await imageFromCanvas(cOriginal);
+          state.processed.gray = await imageFromCanvas(cGray);
+          state.processed.threshold = await imageFromCanvas(cThresh);
+
+          state.mode = 'result';
+          state.selectedView = 'threshold';
+          document.querySelector('input[name="viewMode"][value="threshold"]').checked = true;
+          redraw();
+
+          addPageBtn.disabled = false;
+          exportJpgBtn.disabled = false;
+          exportPdfBtn.disabled = state.pages.length === 0;
+          setStatus('Scan complete. Choose view mode, add page, or export.');
+        } catch (error) {
+          console.error(error);
+          setStatus('Scan failed. Please adjust corners and try again.');
+        } finally {
+          [src, srcRGBA, dst, M, srcTri, dstTri, gray, blur, thresh].forEach((m) => {
+            if (m) m.delete();
+          });
+        }
+      }
+
+      scanBtn.addEventListener('click', runScan);
+
+      document.querySelectorAll('input[name="viewMode"]').forEach((radio) => {
+        radio.addEventListener('change', (e) => {
+          state.selectedView = e.target.value;
+          if (state.mode === 'result') redraw();
+        });
+      });
+
+      addPageBtn.addEventListener('click', () => {
+        const selected = state.processed[state.selectedView] || state.processed.threshold;
+        if (!selected) return;
+        const pageData = {
+          dataUrl: (() => {
+            const c = document.createElement('canvas');
+            c.width = selected.width;
+            c.height = selected.height;
+            c.getContext('2d').drawImage(selected, 0, 0);
+            return c.toDataURL('image/jpeg', 0.95);
+          })(),
+          width: selected.width,
+          height: selected.height,
+        };
+        state.pages.push(pageData);
+        exportPdfBtn.disabled = false;
+        setStatus(`Page added. Total pages: ${state.pages.length}.`);
+      });
+
+      exportJpgBtn.addEventListener('click', () => {
+        const selected = state.processed[state.selectedView] || state.processed.threshold;
+        if (!selected) return;
+
+        const a = document.createElement('a');
+        const c = document.createElement('canvas');
+        c.width = selected.width;
+        c.height = selected.height;
+        c.getContext('2d').drawImage(selected, 0, 0);
+        a.href = c.toDataURL('image/jpeg', 0.95);
+        a.download = 'scanify-page.jpg';
+        a.click();
+      });
+
+      exportPdfBtn.addEventListener('click', () => {
+        if (state.pages.length === 0) return;
+        const { jsPDF } = window.jspdf;
+        const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
+
+        const pageW = 210;
+        const pageH = 297;
+        const margin = 10;
+        const maxW = pageW - margin * 2;
+        const maxH = pageH - margin * 2;
+
+        state.pages.forEach((page, index) => {
+          if (index > 0) pdf.addPage();
+          const ratio = Math.min(maxW / page.width, maxH / page.height);
+          const w = page.width * ratio;
+          const h = page.height * ratio;
+          const x = (pageW - w) / 2;
+          const y = (pageH - h) / 2;
+          pdf.addImage(page.dataUrl, 'JPEG', x, y, w, h);
+        });
+
+        pdf.save('scanify-document.pdf');
+      });
+
+      window.Module = {
+        onRuntimeInitialized() {
+          state.cvReady = true;
+          document.getElementById('loadingOverlay').classList.add('hidden');
+          scanBtn.disabled = !state.imageLoaded;
+          setStatus('Scan engine ready. Upload or capture an image to begin.');
+        },
+      };
+    </script>
+  </body>
+</html>
