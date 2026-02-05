@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scanify</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsfeat/0.0.8/jsfeat-min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/glfx@0.0.4/glfx.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+    <style>
+      body {
+        min-height: 100vh;
+      }
+
+      #mainCanvas {
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: 100%;
+        touch-action: none;
+        cursor: crosshair;
+        display: block;
+      }
+
+      .floating-controls {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .loupe {
+        position: fixed;
+        width: 120px;
+        height: 120px;
+        border-radius: 9999px;
+        border: 4px solid white;
+        overflow: hidden;
+        z-index: 40;
+        pointer-events: none;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+        background: #000;
+      }
+
+      .loupe::after {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: 0;
+        width: 2px;
+        height: 100%;
+        transform: translateX(-50%);
+        background: rgba(255, 255, 255, 0.65);
+      }
+
+      .loupe::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 50%;
+        width: 100%;
+        height: 2px;
+        transform: translateY(-50%);
+        background: rgba(255, 255, 255, 0.65);
+      }
+
+      .overlay {
+        backdrop-filter: blur(5px);
+      }
+
+      .thumb {
+        border: 2px solid transparent;
+      }
+
+      .thumb.active {
+        border-color: hsl(var(--p));
+      }
+    </style>
+  </head>
+  <body class="bg-base-200">
+    <div id="loadingOverlay" class="fixed inset-0 z-50 flex items-center justify-center bg-base-300/90 overlay">
+      <div class="text-center">
+        <span class="loading loading-spinner loading-lg"></span>
+        <p class="mt-3 text-lg font-semibold">Initializing Scan Engine...</p>
+      </div>
+    </div>
+
+    <div class="navbar bg-base-100 shadow-sm">
+      <div class="flex-1 px-3">
+        <span class="text-2xl font-bold">Scanify</span>
+      </div>
+      <div class="flex-none px-3 gap-2 flex-wrap">
+        <button id="scanBtn" class="btn btn-sm btn-secondary" disabled>Scan</button>
+        <button id="exportJpgBtn" class="btn btn-sm btn-outline" disabled>Export JPG</button>
+        <button id="exportPdfBtn" class="btn btn-sm btn-primary" disabled>Export PDF</button>
+      </div>
+    </div>
+
+    <main class="p-3 md:p-4">
+      <div class="flex flex-col md:flex-row gap-3 h-[calc(100vh-86px)]">
+        <aside class="md:w-1/5 w-full bg-base-100 rounded-xl shadow p-3 flex flex-col min-h-[220px]">
+          <input id="fileInput" type="file" class="file-input file-input-bordered file-input-sm w-full" accept="image/*" capture="environment" />
+          <div class="divider my-2">Pages</div>
+          <div id="filmstrip" class="flex-1 overflow-y-auto space-y-2 pr-1"></div>
+          <button id="addPageBtn" class="btn btn-accent btn-sm mt-2" disabled>Add Page</button>
+        </aside>
+
+        <section class="md:w-4/5 w-full bg-base-300 rounded-xl shadow p-3 relative overflow-hidden">
+          <div class="flex flex-wrap gap-2 mb-2">
+            <div class="join">
+              <input class="join-item btn btn-sm" type="radio" name="viewMode" value="original" aria-label="Original" checked />
+              <input class="join-item btn btn-sm" type="radio" name="viewMode" value="better" aria-label="Better" />
+              <input class="join-item btn btn-sm" type="radio" name="viewMode" value="magic" aria-label="Magic Scan" />
+              <input class="join-item btn btn-sm" type="radio" name="viewMode" value="bw" aria-label="B/W" />
+            </div>
+            <select id="themeSelect" class="select select-bordered select-sm w-40">
+              <option>light</option><option>dark</option><option>cupcake</option><option>bumblebee</option><option>emerald</option><option>corporate</option><option>synthwave</option><option>retro</option><option>cyberpunk</option><option>valentine</option><option>halloween</option><option>garden</option><option>forest</option><option>aqua</option><option>lofi</option><option>pastel</option><option>fantasy</option><option>wireframe</option><option>black</option><option>luxury</option><option>dracula</option>
+            </select>
+            <span id="status" class="badge badge-outline badge-sm">Load an image to start</span>
+          </div>
+
+          <div id="canvasViewport" class="w-full h-[calc(100%-38px)] flex items-center justify-center overflow-auto">
+            <canvas id="mainCanvas"></canvas>
+          </div>
+
+          <div class="floating-controls">
+            <button id="zoomInBtn" class="btn btn-circle btn-sm">+</button>
+            <button id="zoomOutBtn" class="btn btn-circle btn-sm">−</button>
+            <button id="rotateBtn" class="btn btn-circle btn-sm">⟳</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <div id="loupe" class="loupe hidden"><canvas id="loupeCanvas" width="120" height="120"></canvas></div>
+
+    <script>
+      const state = {
+        ready: false,
+        image: null,
+        sourceCanvas: document.createElement('canvas'),
+        mode: 'crop',
+        viewMode: 'original',
+        zoom: 1,
+        rotation: 0,
+        corners: [],
+        dragging: -1,
+        pages: [],
+        selectedPageId: null,
+        result: { original: null, better: null, magic: null, bw: null },
+      };
+
+      const refs = {
+        canvas: document.getElementById('mainCanvas'),
+        viewport: document.getElementById('canvasViewport'),
+        status: document.getElementById('status'),
+        fileInput: document.getElementById('fileInput'),
+        scanBtn: document.getElementById('scanBtn'),
+        addPageBtn: document.getElementById('addPageBtn'),
+        exportPdfBtn: document.getElementById('exportPdfBtn'),
+        exportJpgBtn: document.getElementById('exportJpgBtn'),
+        themeSelect: document.getElementById('themeSelect'),
+        filmstrip: document.getElementById('filmstrip'),
+        loadingOverlay: document.getElementById('loadingOverlay'),
+        loupe: document.getElementById('loupe'),
+        loupeCanvas: document.getElementById('loupeCanvas'),
+      };
+      const ctx = refs.canvas.getContext('2d');
+      const loupeCtx = refs.loupeCanvas.getContext('2d');
+
+      function setStatus(t) {
+        refs.status.textContent = t;
+      }
+
+      function clamp(v, min, max) {
+        return Math.max(min, Math.min(max, v));
+      }
+
+      function distance(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      function setCanvasTransform() {
+        refs.canvas.style.transformOrigin = 'center center';
+        refs.canvas.style.transform = `scale(${state.zoom})`;
+      }
+
+      function detectCornersDiagonal(inputCanvas) {
+        const maxW = 600;
+        const ratio = Math.min(maxW / inputCanvas.width, 1);
+        const w = Math.max(1, Math.round(inputCanvas.width * ratio));
+        const h = Math.max(1, Math.round(inputCanvas.height * ratio));
+        const tmp = document.createElement('canvas');
+        tmp.width = w;
+        tmp.height = h;
+        const tctx = tmp.getContext('2d', { willReadFrequently: true });
+        tctx.drawImage(inputCanvas, 0, 0, w, h);
+        const data = tctx.getImageData(0, 0, w, h);
+
+        const gray = new jsfeat.matrix_t(w, h, jsfeat.U8_t | jsfeat.C1_t);
+        jsfeat.imgproc.grayscale(data.data, w, h, gray, jsfeat.COLOR_RGBA2GRAY);
+        jsfeat.imgproc.gaussian_blur(gray, gray, 5, 0);
+        jsfeat.imgproc.canny(gray, gray, 50, 100);
+
+        const pix = gray.data;
+        const px = (x, y) => pix[y * w + x] > 0;
+
+        function search(xStart, xEnd, xStep, yStart, yEnd, yStep) {
+          for (let x = xStart; x !== xEnd; x += xStep) {
+            for (let y = yStart; y !== yEnd; y += yStep) {
+              if (px(x, y)) return { x, y };
+            }
+          }
+          return null;
+        }
+
+        const tl = search(0, Math.floor(w / 2), 1, 0, Math.floor(h / 2), 1);
+        const tr = search(w - 1, Math.floor(w / 2), -1, 0, Math.floor(h / 2), 1);
+        const br = search(w - 1, Math.floor(w / 2), -1, h - 1, Math.floor(h / 2), -1);
+        const bl = search(0, Math.floor(w / 2), 1, h - 1, Math.floor(h / 2), -1);
+
+        const marginX = Math.round(w * 0.2);
+        const marginY = Math.round(h * 0.2);
+        const fallback = [
+          { x: 20, y: 20 },
+          { x: w - 20, y: 20 },
+          { x: w - 20, y: h - 20 },
+          { x: 20, y: h - 20 },
+        ];
+
+        const found = [tl, tr, br, bl];
+        const valid = found.every(Boolean) && found.every((p) => p.x >= marginX - 20 && p.x <= w - marginX + 20 && p.y >= marginY - 20 && p.y <= h - marginY + 20);
+        const points = valid ? found : fallback;
+
+        return points.map((p) => ({ x: p.x / ratio, y: p.y / ratio }));
+      }
+
+      function sortCornersByAngle(points) {
+        const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
+        const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
+        const sorted = [...points].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+        const topTwo = sorted.slice(0, 2).sort((a, b) => a.x - b.x);
+        const botTwo = sorted.slice(2, 4).sort((a, b) => b.x - a.x);
+        const ordered = [topTwo[0], topTwo[1], botTwo[0], botTwo[1]];
+
+        const ySorted = [...points].sort((a, b) => a.y - b.y);
+        const top = ySorted.slice(0, 2).sort((a, b) => a.x - b.x);
+        const bottom = ySorted.slice(2, 4).sort((a, b) => a.x - b.x);
+        return [top[0], top[1], bottom[1], bottom[0]].map((p, i) => ordered[i] && Math.abs(ordered[i].x - p.x) + Math.abs(ordered[i].y - p.y) < 200 ? ordered[i] : p);
+      }
+
+      function resetForImage(img) {
+        state.image = img;
+        state.mode = 'crop';
+        state.viewMode = 'original';
+        state.zoom = 1;
+        setCanvasTransform();
+
+        state.sourceCanvas.width = img.width;
+        state.sourceCanvas.height = img.height;
+        state.sourceCanvas.getContext('2d').drawImage(img, 0, 0);
+
+        refs.canvas.width = img.width;
+        refs.canvas.height = img.height;
+
+        const detected = detectCornersDiagonal(state.sourceCanvas);
+        state.corners = sortCornersByAngle(detected);
+        draw();
+
+        refs.scanBtn.disabled = !state.ready;
+        refs.addPageBtn.disabled = true;
+        refs.exportJpgBtn.disabled = true;
+        setStatus('Auto corners detected. Adjust handles and press Scan.');
+      }
+
+      function drawHandles() {
+        const colors = ['#f43f5e', '#38bdf8', '#22c55e', '#f59e0b'];
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#22d3ee';
+        ctx.beginPath();
+        state.corners.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+        ctx.closePath();
+        ctx.stroke();
+
+        state.corners.forEach((p, i) => {
+          ctx.fillStyle = colors[i];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        });
+      }
+
+      function drawResultView() {
+        const img = state.result[state.viewMode] || state.result.better || state.result.magic;
+        if (!img) return;
+        refs.canvas.width = img.width;
+        refs.canvas.height = img.height;
+        ctx.clearRect(0, 0, refs.canvas.width, refs.canvas.height);
+        ctx.drawImage(img, 0, 0);
+      }
+
+      function draw() {
+        if (!state.image) return;
+        if (state.mode === 'crop') {
+          refs.canvas.width = state.sourceCanvas.width;
+          refs.canvas.height = state.sourceCanvas.height;
+          ctx.clearRect(0, 0, refs.canvas.width, refs.canvas.height);
+          ctx.drawImage(state.sourceCanvas, 0, 0);
+          drawHandles();
+        } else {
+          drawResultView();
+        }
+      }
+
+      function eventPoint(ev) {
+        const rect = refs.canvas.getBoundingClientRect();
+        const p = ev.touches ? ev.touches[0] : ev;
+        return {
+          x: ((p.clientX - rect.left) * refs.canvas.width) / rect.width,
+          y: ((p.clientY - rect.top) * refs.canvas.height) / rect.height,
+          cx: p.clientX,
+          cy: p.clientY,
+        };
+      }
+
+      function showLoupe(clientX, clientY, x, y) {
+        refs.loupe.classList.remove('hidden');
+        refs.loupe.style.left = `${clientX - 60}px`;
+        refs.loupe.style.top = `${clientY - 140}px`;
+
+        loupeCtx.clearRect(0, 0, 120, 120);
+        const sample = 48;
+        loupeCtx.imageSmoothingEnabled = false;
+        loupeCtx.drawImage(refs.canvas, x - sample / 2, y - sample / 2, sample, sample, 0, 0, 120, 120);
+      }
+
+      function hideLoupe() {
+        refs.loupe.classList.add('hidden');
+      }
+
+      function pointerDown(ev) {
+        if (state.mode !== 'crop') return;
+        ev.preventDefault();
+        const p = eventPoint(ev);
+        state.dragging = state.corners.findIndex((c) => distance(c, p) < 24);
+        if (state.dragging >= 0) showLoupe(p.cx, p.cy, p.x, p.y);
+      }
+
+      function pointerMove(ev) {
+        if (state.dragging < 0 || state.mode !== 'crop') return;
+        ev.preventDefault();
+        const p = eventPoint(ev);
+        state.corners[state.dragging].x = clamp(p.x, 0, refs.canvas.width);
+        state.corners[state.dragging].y = clamp(p.y, 0, refs.canvas.height);
+        draw();
+        showLoupe(p.cx, p.cy, p.x, p.y);
+      }
+
+      function pointerUp() {
+        state.dragging = -1;
+        hideLoupe();
+      }
+
+      function dataUrlToImage(dataUrl) {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.src = dataUrl;
+        });
+      }
+
+      function warpPerspectiveGL(sourceCanvas, cornersSorted) {
+        const [tl, tr, br, bl] = cornersSorted;
+        const maxW = Math.max(1, Math.round(Math.max(distance(br, bl), distance(tr, tl))));
+        const maxH = Math.max(1, Math.round(Math.max(distance(tr, br), distance(tl, bl))));
+
+        const fxCanvas = fx.canvas();
+        fxCanvas.width = maxW;
+        fxCanvas.height = maxH;
+        const texture = fxCanvas.texture(sourceCanvas);
+
+        fxCanvas
+          .draw(texture)
+          .perspective([tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y], [0, 0, maxW, 0, maxW, maxH, 0, maxH])
+          .update();
+
+        const out = document.createElement('canvas');
+        out.width = maxW;
+        out.height = maxH;
+        out.getContext('2d').drawImage(fxCanvas, 0, 0);
+
+        texture.destroy();
+        return out;
+      }
+
+      function toGrayscaleCanvas(srcCanvas) {
+        const c = document.createElement('canvas');
+        c.width = srcCanvas.width;
+        c.height = srcCanvas.height;
+        const cctx = c.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(srcCanvas, 0, 0);
+        const img = cctx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+          d[i] = d[i + 1] = d[i + 2] = g;
+        }
+        cctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      function invertCanvas(srcCanvas) {
+        const c = document.createElement('canvas');
+        c.width = srcCanvas.width;
+        c.height = srcCanvas.height;
+        const cctx = c.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(srcCanvas, 0, 0);
+        const img = cctx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = 255 - d[i];
+          d[i + 1] = 255 - d[i + 1];
+          d[i + 2] = 255 - d[i + 2];
+        }
+        cctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      function blurCanvas(srcCanvas, radiusPx = 30) {
+        const c = document.createElement('canvas');
+        c.width = srcCanvas.width;
+        c.height = srcCanvas.height;
+        const cctx = c.getContext('2d');
+        cctx.filter = `blur(${radiusPx}px)`;
+        cctx.drawImage(srcCanvas, 0, 0);
+        cctx.filter = 'none';
+        return c;
+      }
+
+      function applyGamma(srcCanvas, gamma = 0.8) {
+        const c = document.createElement('canvas');
+        c.width = srcCanvas.width;
+        c.height = srcCanvas.height;
+        const cctx = c.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(srcCanvas, 0, 0);
+        const img = cctx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          d[i] = Math.round(255 * Math.pow(d[i] / 255, gamma));
+          d[i + 1] = Math.round(255 * Math.pow(d[i + 1] / 255, gamma));
+          d[i + 2] = Math.round(255 * Math.pow(d[i + 2] / 255, gamma));
+        }
+        cctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      function makeBW(srcCanvas) {
+        const c = document.createElement('canvas');
+        c.width = srcCanvas.width;
+        c.height = srcCanvas.height;
+        const cctx = c.getContext('2d', { willReadFrequently: true });
+        cctx.drawImage(srcCanvas, 0, 0);
+        const img = cctx.getImageData(0, 0, c.width, c.height);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const v = (d[i] + d[i + 1] + d[i + 2]) / 3;
+          const b = v > 190 ? 255 : 0;
+          d[i] = d[i + 1] = d[i + 2] = b;
+        }
+        cctx.putImageData(img, 0, 0);
+        return c;
+      }
+
+      function magicScanFilter(warpedCanvas) {
+        const gray = toGrayscaleCanvas(warpedCanvas);
+        const inv = invertCanvas(gray);
+        const mask = blurCanvas(inv, 30);
+
+        const out = document.createElement('canvas');
+        out.width = warpedCanvas.width;
+        out.height = warpedCanvas.height;
+        const octx = out.getContext('2d');
+
+        octx.globalCompositeOperation = 'source-over';
+        octx.drawImage(gray, 0, 0);
+        octx.globalCompositeOperation = 'color-dodge';
+        octx.drawImage(mask, 0, 0);
+        octx.globalCompositeOperation = 'source-over';
+
+        return applyGamma(out, 0.8);
+      }
+
+      function betterScanFilter(warpedCanvas) {
+        const gray = toGrayscaleCanvas(warpedCanvas);
+        const inv = invertCanvas(gray);
+        const mask = blurCanvas(inv, 12);
+
+        const dodged = document.createElement('canvas');
+        dodged.width = warpedCanvas.width;
+        dodged.height = warpedCanvas.height;
+        const dctx = dodged.getContext('2d');
+        dctx.globalCompositeOperation = 'source-over';
+        dctx.drawImage(gray, 0, 0);
+        dctx.globalCompositeOperation = 'color-dodge';
+        dctx.globalAlpha = 0.65;
+        dctx.drawImage(mask, 0, 0);
+        dctx.globalAlpha = 1;
+        dctx.globalCompositeOperation = 'source-over';
+
+        return applyGamma(dodged, 0.92);
+      }
+
+      async function runScan() {
+        if (!state.image) return;
+        setStatus('Warping & cleaning...');
+
+        const sorted = sortCornersByAngle(state.corners);
+        const warped = warpPerspectiveGL(state.sourceCanvas, sorted);
+        const better = betterScanFilter(warped);
+        const magic = magicScanFilter(warped);
+        const bw = makeBW(magic);
+
+        state.result = {
+          original: await dataUrlToImage(warped.toDataURL('image/jpeg', 0.96)),
+          better: await dataUrlToImage(better.toDataURL('image/jpeg', 0.96)),
+          magic: await dataUrlToImage(magic.toDataURL('image/jpeg', 0.96)),
+          bw: await dataUrlToImage(bw.toDataURL('image/jpeg', 0.96)),
+        };
+
+        state.mode = 'result';
+        state.viewMode = 'better';
+        document.querySelector('input[name="viewMode"][value="better"]').checked = true;
+        refs.addPageBtn.disabled = false;
+        refs.exportJpgBtn.disabled = false;
+        draw();
+        setStatus('Scan complete. Add page or export.');
+      }
+
+      function renderFilmstrip() {
+        refs.filmstrip.innerHTML = '';
+        state.pages.forEach((p) => {
+          const card = document.createElement('button');
+          card.className = `thumb ${p.id === state.selectedPageId ? 'active' : ''} w-full bg-base-200 rounded-lg p-1 text-left`;
+          card.innerHTML = `
+            <img src="${p.preview}" alt="page" class="w-full h-24 object-cover rounded" />
+            <div class="text-xs mt-1 px-1">Page ${p.id} · ${p.filter}</div>
+          `;
+          card.onclick = () => {
+            state.selectedPageId = p.id;
+            renderFilmstrip();
+          };
+          refs.filmstrip.appendChild(card);
+        });
+      }
+
+      function addCurrentPage() {
+        const img = state.result[state.viewMode] || state.result.better || state.result.magic;
+        if (!img) return;
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const data = c.toDataURL('image/png');
+        const id = state.pages.length + 1;
+        state.pages.push({ id, src: data, format: 'PNG', corners: JSON.parse(JSON.stringify(state.corners)), filter: state.viewMode, preview: data, width: c.width, height: c.height });
+        state.selectedPageId = id;
+        refs.exportPdfBtn.disabled = false;
+        renderFilmstrip();
+        setStatus(`Added page ${id}. Total pages: ${state.pages.length}.`);
+      }
+
+      function exportCurrentJpg() {
+        const img = state.result[state.viewMode] || state.result.better || state.result.magic;
+        if (!img) return;
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const a = document.createElement('a');
+        a.href = c.toDataURL('image/jpeg', 0.95);
+        a.download = 'scanify-page.jpg';
+        a.click();
+      }
+
+      function exportPdf() {
+        if (!state.pages.length) return;
+        const { jsPDF } = window.jspdf;
+        const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
+        const pageW = 210;
+        const pageH = 297;
+        const margin = 10;
+        const maxW = pageW - margin * 2;
+        const maxH = pageH - margin * 2;
+
+        state.pages.forEach((p, idx) => {
+          if (idx > 0) pdf.addPage();
+          const ratio = Math.min(maxW / p.width, maxH / p.height);
+          const w = p.width * ratio;
+          const h = p.height * ratio;
+          const x = (pageW - w) / 2;
+          const y = (pageH - h) / 2;
+          pdf.addImage(p.src, p.format || 'PNG', x, y, w, h);
+        });
+        pdf.save('scanify-document.pdf');
+      }
+
+      function rotateSource90() {
+        if (!state.image) return;
+        const src = state.sourceCanvas;
+        const c = document.createElement('canvas');
+        c.width = src.height;
+        c.height = src.width;
+        const cctx = c.getContext('2d');
+        cctx.translate(c.width / 2, c.height / 2);
+        cctx.rotate(Math.PI / 2);
+        cctx.drawImage(src, -src.width / 2, -src.height / 2);
+
+        state.sourceCanvas.width = c.width;
+        state.sourceCanvas.height = c.height;
+        state.sourceCanvas.getContext('2d').drawImage(c, 0, 0);
+        state.corners = sortCornersByAngle(detectCornersDiagonal(state.sourceCanvas));
+        state.mode = 'crop';
+        draw();
+        setStatus('Rotated 90°. Re-detected corners.');
+      }
+
+      function wireEvents() {
+        refs.themeSelect.addEventListener('change', (e) => document.documentElement.setAttribute('data-theme', e.target.value));
+        refs.fileInput.addEventListener('change', (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const img = new Image();
+          img.onload = () => resetForImage(img);
+          img.src = URL.createObjectURL(file);
+        });
+
+        refs.scanBtn.addEventListener('click', runScan);
+        refs.addPageBtn.addEventListener('click', addCurrentPage);
+        refs.exportJpgBtn.addEventListener('click', exportCurrentJpg);
+        refs.exportPdfBtn.addEventListener('click', exportPdf);
+
+        document.querySelectorAll('input[name="viewMode"]').forEach((el) => {
+          el.addEventListener('change', (e) => {
+            state.viewMode = e.target.value;
+            if (state.mode === 'result') draw();
+          });
+        });
+
+        refs.canvas.addEventListener('mousedown', pointerDown);
+        refs.canvas.addEventListener('mousemove', pointerMove);
+        window.addEventListener('mouseup', pointerUp);
+        refs.canvas.addEventListener('touchstart', pointerDown, { passive: false });
+        refs.canvas.addEventListener('touchmove', pointerMove, { passive: false });
+        window.addEventListener('touchend', pointerUp);
+        window.addEventListener('touchcancel', pointerUp);
+
+        document.getElementById('zoomInBtn').addEventListener('click', () => {
+          state.zoom = Math.min(3, state.zoom + 0.2);
+          setCanvasTransform();
+        });
+        document.getElementById('zoomOutBtn').addEventListener('click', () => {
+          state.zoom = Math.max(0.6, state.zoom - 0.2);
+          setCanvasTransform();
+        });
+        document.getElementById('rotateBtn').addEventListener('click', rotateSource90);
+      }
+
+      function init() {
+        wireEvents();
+        try {
+          if (!window.jsfeat || !window.fx || !window.jspdf) throw new Error('Library load failed');
+          state.ready = true;
+          refs.loadingOverlay.classList.add('hidden');
+          setStatus('Engine ready. Upload image to begin.');
+        } catch (e) {
+          setStatus('Failed to initialize libraries. Refresh and try again.');
+          console.error(e);
+        }
+      }
+
+      window.addEventListener('load', init);
+    </script>
+  </body>
+</html>
