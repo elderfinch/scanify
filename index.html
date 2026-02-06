@@ -130,12 +130,19 @@
       const ctx = refs.canvas.getContext('2d');
       const loupeCtx = refs.loupeCanvas.getContext('2d');
 
-      function setStatus(t) { refs.status.textContent = t; }
-      function setStage(s) { state.stage = s; refs.stageBadge.textContent = s === 'crop' ? 'Crop Stage' : 'Review / Export'; }
+      function setStatus(t) {
+        refs.status.textContent = t;
+        console.info('[Scanify] status:', t);
+      }
+      function setStage(s) {
+        state.stage = s;
+        refs.stageBadge.textContent = s === 'crop' ? 'Crop Stage' : 'Review / Export';
+      }
       const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
       const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
       function saveState() {
+        console.debug('[Scanify] saving state');
         const payload = {
           stage: state.stage,
           zoom: state.zoom,
@@ -150,8 +157,12 @@
       }
 
       async function restoreState() {
+        console.debug('[Scanify] restoring state');
         const data = await localforage.getItem(DB_KEY);
-        if (!data) return;
+        if (!data) {
+          console.debug('[Scanify] no saved state found');
+          return;
+        }
         Object.assign(state, data);
         applySettingsUI();
         renderFilmstrip();
@@ -178,6 +189,7 @@
       }
 
       async function clearAll() {
+        console.warn('[Scanify] clearing storage');
         await localforage.removeItem(DB_KEY);
         location.reload();
       }
@@ -424,8 +436,10 @@
 
       async function onInputFile(file) {
         if (!file) return;
+        console.info('[Scanify] input file selected', { name: file.name, type: file.type, size: file.size });
         const fr = new FileReader();
         fr.onload = async () => {
+          console.info('[Scanify] file loaded into memory');
           state.imageSrc = fr.result;
           state.corners = [];
           const img = await dataUrlToImage(state.imageSrc);
@@ -512,21 +526,40 @@
       }
 
       async function init() {
+        console.info('[Scanify] init start');
         bindEvents();
         if (!window.jsfeat || !window.fx || !window.jspdf || !window.localforage) {
+          console.error('[Scanify] library check failed', {
+            jsfeat: !!window.jsfeat,
+            fx: !!window.fx,
+            jspdf: !!window.jspdf,
+            localforage: !!window.localforage,
+          });
           setStatus('Failed to load required libraries.');
           refs.loading.classList.add('hidden');
           return;
         }
+        console.info('[Scanify] libraries loaded');
         await restoreState();
         applySettingsUI();
         applyZoom();
         state.ready = true;
         refs.loading.classList.add('hidden');
         if (!state.pages.length && !state.imageSrc) setStatus('Engine ready. Upload or capture a document.');
+        console.info('[Scanify] init complete', { stage: state.stage, pages: state.pages.length });
       }
 
       window.addEventListener('load', init);
+      window.addEventListener('error', (event) => {
+        console.error('[Scanify] window error', event.error || event.message);
+        setStatus('Initialization error. Check console logs.');
+        refs.loading.classList.add('hidden');
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        console.error('[Scanify] unhandled rejection', event.reason);
+        setStatus('Initialization error. Check console logs.');
+        refs.loading.classList.add('hidden');
+      });
     </script>
   </body>
 </html>
