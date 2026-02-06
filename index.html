@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Scanify</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" />
     <link href="https://cdn.jsdelivr.net/npm/remixicon@4.3.0/fonts/remixicon.css" rel="stylesheet" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jsfeat/0.0.8/jsfeat-min.js"></script>
@@ -549,7 +549,13 @@
         console.info('[Scanify] init complete', { stage: state.stage, pages: state.pages.length });
       }
 
-      window.addEventListener('load', init);
+      window.addEventListener('DOMContentLoaded', () => {
+        console.info('[Scanify] DOMContentLoaded');
+      });
+      window.addEventListener('load', () => {
+        console.info('[Scanify] window load event');
+        init();
+      });
       window.addEventListener('error', (event) => {
         console.error('[Scanify] window error', event.error || event.message);
         setStatus('Initialization error. Check console logs.');
